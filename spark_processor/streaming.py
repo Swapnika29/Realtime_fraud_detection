@@ -1,4 +1,5 @@
 import os
+from xml.parsers.expat import model
 import pandas as pd
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, pandas_udf
@@ -47,12 +48,21 @@ def main():
     # Parse JSON
     parsed_df = df.select(from_json(col("value").cast("string"), schema).alias("data")).select("data.*")
 
+    model = joblib.load(model_path)
+    broadcast_model = spark.sparkContext.broadcast(model)
+
     @pandas_udf(IntegerType())
-    def detect_anomaly(amount: pd.Series, oldbalanceOrg: pd.Series, newbalanceOrig: pd.Series, 
-                       oldbalanceDest: pd.Series, newbalanceDest: pd.Series, type_col: pd.Series) -> pd.Series:
+    def detect_anomaly(
+        amount: pd.Series,
+        oldbalanceOrg: pd.Series,
+        newbalanceOrig: pd.Series,
+        oldbalanceDest: pd.Series,
+        newbalanceDest: pd.Series,
+        type_col: pd.Series
+    ) -> pd.Series:
         
         # Load model for this batch. Using joblib inside the UDF.
-        model = joblib.load(model_path)
+        model = broadcast_model.value
         
         # Reconstruct DataFrame
         pdf = pd.DataFrame({
@@ -66,10 +76,7 @@ def main():
         
         # Predict (-1 is anomaly, 1 is normal)
         preds = model.predict(pdf)
-        
-        # Convert -1 to 1 (Fraud), 1 to 0 (Normal)
-        results = [1 if p == -1 else 0 for p in preds]
-        return pd.Series(results)
+        return pd.Series([1 if p == -1 else 0 for p in preds])
 
     # Apply Pandas UDF
     predictions_df = parsed_df.withColumn("prediction", detect_anomaly(
